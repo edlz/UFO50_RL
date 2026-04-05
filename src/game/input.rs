@@ -138,22 +138,7 @@ impl Input {
         }
     }
 
-    fn vk_name(vk: usize) -> &'static str {
-        match vk {
-            VK_UP => "Up",
-            VK_DOWN => "Down",
-            VK_LEFT => "Left",
-            VK_RIGHT => "Right",
-            VK_Z => "A(Z)",
-            VK_X => "B(X)",
-            VK_ESCAPE => "Start(Esc)",
-            _ => "???",
-        }
-    }
-
     fn post_key(&self, vk: usize, up: bool) {
-        let action = if up { "release" } else { "press" };
-        println!("  key: {} {}", action, Self::vk_name(vk));
         let msg = if up { WM_KEYUP } else { WM_KEYDOWN };
         // lParam: repeat=1, scancode, extended flag, previous state
         let scan = unsafe { MapVirtualKeyA(vk as u32, MAPVK_VK_TO_VSC) };
