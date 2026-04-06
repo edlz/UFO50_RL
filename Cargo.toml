@@ -26,5 +26,4 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Gdi",
 ] }
 tch = "0.24"
-rand = "0.8"
 tensorboard-rs = "0.5"

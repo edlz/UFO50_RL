@@ -228,6 +228,27 @@ fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
                 ep_life_lost = 0;
                 ep_survival = 0.0;
                 episode_start = std::time::Instant::now();
+                // Run PPO on partial rollout before clearing
+                if buffer.len() >= 32 {
+                    let last_value = 0.0; // episode ended
+                    let (advantages, returns) = train::ppo::compute_gae(
+                        &buffer.rewards,
+                        &buffer.values,
+                        &buffer.dones,
+                        last_value,
+                        GAMMA,
+                        GAE_LAMBDA,
+                    );
+                    let _stats = train::ppo::update(
+                        &mut model,
+                        &mut opt,
+                        &buffer,
+                        &advantages,
+                        &returns,
+                        &ppo_cfg,
+                    );
+                    update_count += 1;
+                }
                 buffer.clear();
                 if let Some(max) = max_episodes {
                     if episode >= max {
@@ -303,8 +324,8 @@ fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
 
         timing_frames += 1;
 
-        // PPO update when buffer full
-        if buffer.len() == ROLLOUT_LEN {
+        // PPO update when buffer full OR episode ended with enough data
+        if buffer.len() >= ROLLOUT_LEN || (done && buffer.len() >= 32) {
             let t4 = std::time::Instant::now();
             // Bootstrap: V(s_{T+1}). If episode ended, future value is 0.
             // Otherwise use value of the last state (close approximation at 47fps).
