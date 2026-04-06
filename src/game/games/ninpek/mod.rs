@@ -1,3 +1,5 @@
+// All pixel regions (score, lives, game_over) are calibrated for 128x128 capture resolution.
+// If the resolution changes, all coordinates must be recalibrated.
 mod game_over;
 mod lives;
 pub mod rewards;

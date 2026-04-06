@@ -5,11 +5,8 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::*;
 
-const OBS_W: u32 = 128;
-const OBS_H: u32 = 128;
+use ufo50ppo::util::{OBS_H, OBS_W, WINDOW_TITLE};
 const SNAP_INTERVAL: u32 = 100;
-const WINDOW_TITLE: &str = "Picture-in-Picture";
-// const WINDOW_TITLE: &str = "UFO 50";
 
 // Regions from ninpek config
 const SCORE_X: u32 = game::games::ninpek::NINPEK_SCORE.region.x;

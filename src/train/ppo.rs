@@ -112,6 +112,13 @@ impl Default for PpoConfig {
     }
 }
 
+pub struct UpdateStats {
+    pub policy_loss: f64,
+    pub value_loss: f64,
+    pub entropy: f64,
+    pub total_loss: f64,
+}
+
 /// Run one PPO update over the rollout buffer.
 pub fn update(
     model: &mut ActorCritic,
@@ -120,7 +127,7 @@ pub fn update(
     advantages: &[f64],
     returns: &[f64],
     cfg: &PpoConfig,
-) {
+) -> UpdateStats {
     let clip_epsilon = cfg.clip_epsilon;
     let value_coeff = cfg.value_coeff;
     let entropy_coeff = cfg.entropy_coeff;
@@ -132,18 +139,29 @@ pub fn update(
 
     let obs_batch = Tensor::cat(&buffer.obs, 0); // [N, 4, 84, 84]
     let actions_t = Tensor::from_slice(&buffer.actions).to_device(device);
-    let old_log_probs_t = Tensor::from_slice(&buffer.log_probs).to_device(device);
+    // Old log probs must not carry gradients — PPO compares new vs old, not optimizes old
+    let old_log_probs_t = Tensor::from_slice(&buffer.log_probs)
+        .to_device(device)
+        .detach();
     let advantages_t = Tensor::from_slice(advantages)
         .to_device(device)
-        .to_kind(Kind::Float);
+        .to_kind(Kind::Float)
+        .detach();
     let returns_t = Tensor::from_slice(returns)
         .to_device(device)
-        .to_kind(Kind::Float);
+        .to_kind(Kind::Float)
+        .detach();
 
     // Normalize advantages
     let adv_mean = advantages_t.mean(Kind::Float);
     let adv_std = advantages_t.std(true) + 1e-8;
     let advantages_t = (&advantages_t - &adv_mean) / &adv_std;
+
+    let mut total_policy_loss = 0.0;
+    let mut total_value_loss = 0.0;
+    let mut total_entropy = 0.0;
+    let mut total_loss_sum = 0.0;
+    let mut num_batches = 0;
 
     for _epoch in 0..num_epochs {
         let perm = Tensor::randperm(n, (Kind::Int64, device));
@@ -184,6 +202,12 @@ pub fn update(
 
             let loss = &policy_loss + value_coeff * &value_loss - entropy_coeff * &entropy;
 
+            total_policy_loss += f64::try_from(&policy_loss).unwrap_or(0.0);
+            total_value_loss += f64::try_from(&value_loss).unwrap_or(0.0);
+            total_entropy += f64::try_from(&entropy).unwrap_or(0.0);
+            total_loss_sum += f64::try_from(&loss).unwrap_or(0.0);
+            num_batches += 1;
+
             opt.zero_grad();
             loss.backward();
             opt.clip_grad_norm(max_grad_norm);
@@ -191,5 +215,13 @@ pub fn update(
 
             start = end;
         }
+    }
+
+    let n = num_batches.max(1) as f64;
+    UpdateStats {
+        policy_loss: total_policy_loss / n,
+        value_loss: total_value_loss / n,
+        entropy: total_entropy / n,
+        total_loss: total_loss_sum / n,
     }
 }

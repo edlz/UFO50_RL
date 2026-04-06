@@ -57,7 +57,7 @@ impl FrameStack {
         }
         self.count += 1;
 
-        self.buffer.shallow_clone()
+        self.buffer.copy()
     }
 
     pub fn reset(&mut self) {

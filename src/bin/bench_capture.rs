@@ -1,6 +1,5 @@
 use ufo50ppo::game;
-
-const WINDOW_TITLE: &str = "UFO 50";
+use ufo50ppo::util::WINDOW_TITLE;
 const BENCH_FRAMES: u32 = 300;
 const SIZES: &[(u32, u32)] = &[
     (84, 84),

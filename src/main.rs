@@ -1,8 +1,5 @@
 use ufo50ppo::game;
-
-const OBS_W: u32 = 128;
-const OBS_H: u32 = 128;
-const WINDOW_TITLE: &str = "UFO 50";
+use ufo50ppo::util::{OBS_H, OBS_W, WINDOW_TITLE};
 
 fn main() -> windows::core::Result<()> {
     game::capture::init()?;
