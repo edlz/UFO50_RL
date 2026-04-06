@@ -4,7 +4,9 @@ fn valid_buf(bgra: &[u8], width: u32) -> bool {
 
 /// Detect leaderboard by checking for its structural pattern.
 pub fn is_leaderboard(bgra: &[u8], width: u32) -> bool {
-    if !valid_buf(bgra, width) { return false; }
+    if !valid_buf(bgra, width) {
+        return false;
+    }
     let leaderboard_rows: &[u32] = &[5, 6, 19, 20, 28, 29, 38, 39, 47, 48, 57, 58, 66, 67];
     let mut total_white = 0u32;
     let mut rows_with_white = 0u32;
@@ -28,7 +30,9 @@ pub fn is_leaderboard(bgra: &[u8], width: u32) -> bool {
 
 /// Check for the shared completion screen pattern: blue+orange icons + white center text + no HUD.
 fn is_completion_screen(bgra: &[u8], width: u32) -> bool {
-    if !valid_buf(bgra, width) { return false; }
+    if !valid_buf(bgra, width) {
+        return false;
+    }
     let mut blue_count = 0u32;
     let mut orange_count = 0u32;
     let mut center_white = 0u32;
@@ -102,7 +106,9 @@ pub fn is_game_complete(bgra: &[u8], width: u32) -> bool {
 
 /// Fully black frame (transition between screens).
 pub fn is_black_screen(bgra: &[u8], width: u32, height: u32) -> bool {
-    if bgra.len() < (width * height * 4) as usize { return false; }
+    if bgra.len() < (width * height * 4) as usize {
+        return false;
+    }
     let total = (width * height) as usize;
     let dark = (0..total)
         .filter(|&i| bgra[i * 4] < 10 && bgra[i * 4 + 1] < 10 && bgra[i * 4 + 2] < 10)
@@ -113,7 +119,9 @@ pub fn is_black_screen(bgra: &[u8], width: u32, height: u32) -> bool {
 /// Game selection menu: colored content in center (y=28-56) but no HUD at top (y=0-20)
 /// and no game world at bottom (y=104+).
 pub fn is_game_menu(bgra: &[u8], width: u32) -> bool {
-    if !valid_buf(bgra, width) { return false; }
+    if !valid_buf(bgra, width) {
+        return false;
+    }
     // Check for center content (menu items)
     let mut center_content = 0u32;
     for y in 28..57 {

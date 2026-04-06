@@ -180,7 +180,11 @@ fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
             total_frames += 1;
             if result.done {
                 // Game over detected on a menu frame — trigger episode reset
-                let reason = if result.event_name.is_empty() { "DONE" } else { result.event_name };
+                let reason = if result.event_name.is_empty() {
+                    "DONE"
+                } else {
+                    result.event_name
+                };
                 println!(
                     "\rEpisode {:4} | {} | reward: {:+.1} | frames: {} | total: {} | updates: {}          ",
                     episode, reason, episode_reward, episode_frames, total_frames, update_count
@@ -188,14 +192,29 @@ fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
                 if debug {
                     print_episode_breakdown(ep_scores, ep_life_gained, ep_life_lost, ep_survival);
                 }
-                logger.log_episode(total_frames as usize, episode_reward, episode_frames, result.lives);
+                logger.log_episode(
+                    total_frames as usize,
+                    episode_reward,
+                    episode_frames,
+                    result.lives,
+                );
                 if episode_reward > best_reward {
                     best_reward = episode_reward;
-                    save_checkpoint(&checkpoint_dir, "best", &model, episode, total_frames, update_count, best_reward);
+                    save_checkpoint(
+                        &checkpoint_dir,
+                        "best",
+                        &model,
+                        episode,
+                        total_frames,
+                        update_count,
+                        best_reward,
+                    );
                     println!("  New best: {:+.1}", best_reward);
                 }
                 runner.reset_game(tracker.extra_reset_keys());
-                if !drain_until_gameplay(&mut *runner, &tracker, &mut total_frames) { return; }
+                if !drain_until_gameplay(&mut *runner, &tracker, &mut total_frames) {
+                    return;
+                }
                 frame_stack.reset();
                 tracker = games::ninpek::NinpekTracker::new(w);
                 episode += 1;
@@ -204,11 +223,17 @@ fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
                 }
                 episode_reward = 0.0;
                 episode_frames = 0;
-                ep_scores = 0; ep_life_gained = 0; ep_life_lost = 0; ep_survival = 0.0;
+                ep_scores = 0;
+                ep_life_gained = 0;
+                ep_life_lost = 0;
+                ep_survival = 0.0;
                 episode_start = std::time::Instant::now();
                 buffer.clear();
                 if let Some(max) = max_episodes {
-                    if episode >= max { println!("Reached {} episodes, stopping.", max); break; }
+                    if episode >= max {
+                        println!("Reached {} episodes, stopping.", max);
+                        break;
+                    }
                 }
             }
             continue;
@@ -339,18 +364,26 @@ fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
             timing_frames = 0;
         }
 
-
         // Live status line
         if episode_frames % 10 == 0 {
             print!(
                 "\rEp {:3} | reward: {:+7.1} | lives: {} | frame: {} | updates: {} | {}     ",
-                episode, episode_reward, result.lives, episode_frames, update_count, result.event_name
+                episode,
+                episode_reward,
+                result.lives,
+                episode_frames,
+                update_count,
+                result.event_name
             );
         }
 
         // Episode end
         if done {
-            let reason = if result.event_name.is_empty() { "DONE" } else { result.event_name };
+            let reason = if result.event_name.is_empty() {
+                "DONE"
+            } else {
+                result.event_name
+            };
             println!(
                 "\rEpisode {:4} | {} | reward: {:+.1} | frames: {} | total: {} | updates: {}          ",
                 episode, reason, episode_reward, episode_frames, total_frames, update_count
@@ -397,7 +430,10 @@ fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
             }
             episode_reward = 0.0;
             episode_frames = 0;
-            ep_scores = 0; ep_life_gained = 0; ep_life_lost = 0; ep_survival = 0.0;
+            ep_scores = 0;
+            ep_life_gained = 0;
+            ep_life_lost = 0;
+            ep_survival = 0.0;
             episode_start = std::time::Instant::now();
 
             if let Some(max) = max_episodes {

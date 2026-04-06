@@ -4,8 +4,8 @@ use super::game_over;
 use super::lives;
 use super::rewards;
 use super::score;
-use crate::platform::win32::input::VK_Z;
 use crate::platform::NUM_ACTIONS;
+use crate::platform::win32::input::VK_Z;
 
 pub struct NinpekTracker {
     prev_pixels: Vec<u8>,
