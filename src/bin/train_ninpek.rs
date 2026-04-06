@@ -50,7 +50,25 @@ fn save_checkpoint(
     );
 }
 
-/// Drain frames until a clean gameplay frame appears.
+fn explained_variance(values: &[f64], returns: &[f64]) -> f64 {
+    let n = values.len() as f64;
+    if n < 2.0 {
+        return 0.0;
+    }
+    let mean_r = returns.iter().sum::<f64>() / n;
+    let var_r = returns.iter().map(|r| (r - mean_r).powi(2)).sum::<f64>() / n;
+    if var_r < 1e-8 {
+        return 0.0;
+    }
+    let var_diff = values
+        .iter()
+        .zip(returns)
+        .map(|(v, r)| (r - v).powi(2))
+        .sum::<f64>()
+        / n;
+    1.0 - var_diff / var_r
+}
+
 fn print_episode_breakdown(scores: u32, life_gained: u32, life_lost: u32, survival: f64) {
     println!(
         "  scores: {} | life+: {} | life-: {} | survival: {:.1}",
@@ -251,6 +269,8 @@ fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
                         stats.total_loss,
                     );
                     logger.log_learning_rate(total_frames as usize, LEARNING_RATE);
+                    let ev = explained_variance(&buffer.values, &returns);
+                    logger.log_explained_variance(total_frames as usize, ev);
                 }
                 buffer.clear();
                 if let Some(max) = max_episodes {
@@ -294,6 +314,47 @@ fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
         if let Some(max) = max_frames {
             if total_frames >= max {
                 println!("\rReached {} frames, stopping.", max);
+                // Flush partial rollout
+                if buffer.len() >= 32 {
+                    let last_value = value;
+                    let (advantages, returns) = train::ppo::compute_gae(
+                        &buffer.rewards,
+                        &buffer.values,
+                        &buffer.dones,
+                        last_value,
+                        GAMMA,
+                        GAE_LAMBDA,
+                    );
+                    let stats = train::ppo::update(
+                        &mut model,
+                        &mut opt,
+                        &buffer,
+                        &advantages,
+                        &returns,
+                        &ppo_cfg,
+                    );
+                    update_count += 1;
+                    logger.log_update(
+                        total_frames as usize,
+                        stats.policy_loss,
+                        stats.value_loss,
+                        stats.entropy,
+                        stats.total_loss,
+                    );
+                    logger.log_explained_variance(
+                        total_frames as usize,
+                        explained_variance(&buffer.values, &returns),
+                    );
+                }
+                save_checkpoint(
+                    &checkpoint_dir,
+                    "latest",
+                    &model,
+                    episode,
+                    total_frames,
+                    update_count,
+                    best_reward,
+                );
                 break;
             }
         }
@@ -350,6 +411,7 @@ fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
                 &ppo_cfg,
             );
             t_ppo += t4.elapsed();
+            let ev = explained_variance(&buffer.values, &returns);
             buffer.clear();
             update_count += 1;
 
@@ -361,6 +423,7 @@ fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
                 stats.total_loss,
             );
             logger.log_learning_rate(total_frames as usize, LEARNING_RATE);
+            logger.log_explained_variance(total_frames as usize, ev);
         }
 
         if let Some(ref dtx) = debug_tx {
@@ -458,6 +521,15 @@ fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
             if let Some(max) = max_episodes {
                 if episode >= max {
                     println!("Reached {} episodes, stopping.", max);
+                    save_checkpoint(
+                        &checkpoint_dir,
+                        "latest",
+                        &model,
+                        episode,
+                        total_frames,
+                        update_count,
+                        best_reward,
+                    );
                     break;
                 }
             }

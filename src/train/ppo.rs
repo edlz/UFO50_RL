@@ -154,7 +154,7 @@ pub fn update(
 
     // Normalize advantages
     let adv_mean = advantages_t.mean(Kind::Float);
-    let adv_std = advantages_t.std(true) + 1e-8;
+    let adv_std = advantages_t.std(true).clamp_min(1e-5);
     let advantages_t = (&advantages_t - &adv_mean) / &adv_std;
 
     let mut total_policy_loss = 0.0;

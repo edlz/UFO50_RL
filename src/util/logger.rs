@@ -64,6 +64,11 @@ impl TbLogger {
             .add_scalar("train/total_loss", total_loss as f32, s);
     }
 
+    pub fn log_explained_variance(&mut self, step: usize, ev: f64) {
+        self.writer
+            .add_scalar("train/explained_variance", ev as f32, self.step(step));
+    }
+
     pub fn log_learning_rate(&mut self, step: usize, lr: f64) {
         self.writer
             .add_scalar("train/learning_rate", lr as f32, self.step(step));
