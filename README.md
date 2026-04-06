@@ -21,8 +21,9 @@ cargo run --release --bin train_ninpek
 # Train with namespace (separate experiment)
 cargo run --release --bin train_ninpek -- -n experiment1
 
-# Train with limits
+# Train with limits (whichever comes first)
 cargo run --release --bin train_ninpek -- -e 100 -f 500000
+cargo run --release --bin train_ninpek -- -m 60
 
 # Debug mode (saves frames + reward breakdown)
 cargo run --release --bin train_ninpek -- -d
@@ -38,6 +39,7 @@ tensorboard --logdir runs/ninpek
 | `--namespace` | `-n` | Training namespace (default: "default") |
 | `--episodes` | `-e` | Max episodes before stopping |
 | `--frames` | `-f` | Max frames before stopping |
+| `--minutes` | `-m` | Max training time in minutes |
 | `--debug` | `-d` | Save frames to `debug_frames/ep_NNNN/`, print per-episode reward breakdown |
 
 ## Training Output

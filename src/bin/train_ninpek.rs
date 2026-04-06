@@ -101,6 +101,7 @@ fn drain_until_gameplay(
 struct TrainingConfig {
     max_episodes: Option<u32>,
     max_frames: Option<u64>,
+    max_minutes: Option<u64>,
     debug: bool,
     debug_tx: Option<mpsc::SyncSender<DebugMsg>>,
     checkpoint_dir: String,
@@ -111,11 +112,14 @@ fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
     let TrainingConfig {
         max_episodes,
         max_frames,
+        max_minutes,
         debug,
         debug_tx,
         checkpoint_dir,
         runs_dir,
     } = cfg;
+    let training_start = std::time::Instant::now();
+    let max_duration = max_minutes.map(|m| std::time::Duration::from_secs(m * 60));
     let w = runner.obs_width();
     let h = runner.obs_height();
     let device = tch::Device::cuda_if_available();
@@ -311,52 +315,57 @@ fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
             _ => {}
         }
 
-        if let Some(max) = max_frames {
-            if total_frames >= max {
-                println!("\rReached {} frames, stopping.", max);
-                // Flush partial rollout
-                if buffer.len() >= 32 {
-                    let last_value = value;
-                    let (advantages, returns) = train::ppo::compute_gae(
-                        &buffer.rewards,
-                        &buffer.values,
-                        &buffer.dones,
-                        last_value,
-                        GAMMA,
-                        GAE_LAMBDA,
-                    );
-                    let stats = train::ppo::update(
-                        &mut model,
-                        &mut opt,
-                        &buffer,
-                        &advantages,
-                        &returns,
-                        &ppo_cfg,
-                    );
-                    update_count += 1;
-                    logger.log_update(
-                        total_frames as usize,
-                        stats.policy_loss,
-                        stats.value_loss,
-                        stats.entropy,
-                        stats.total_loss,
-                    );
-                    logger.log_explained_variance(
-                        total_frames as usize,
-                        explained_variance(&buffer.values, &returns),
-                    );
-                }
-                save_checkpoint(
-                    &checkpoint_dir,
-                    "latest",
-                    &model,
-                    episode,
-                    total_frames,
-                    update_count,
-                    best_reward,
-                );
-                break;
+        // Check time limit every 100 frames to avoid per-frame syscall
+        let time_up =
+            max_duration.is_some_and(|d| total_frames % 100 == 0 && training_start.elapsed() >= d);
+        if time_up || max_frames.is_some_and(|max| total_frames >= max) {
+            if time_up {
+                println!("\rReached {} minutes, stopping.", max_minutes.unwrap());
+            } else {
+                println!("\rReached {} frames, stopping.", max_frames.unwrap());
             }
+            // Flush partial rollout
+            if buffer.len() >= 32 {
+                let last_value = value;
+                let (advantages, returns) = train::ppo::compute_gae(
+                    &buffer.rewards,
+                    &buffer.values,
+                    &buffer.dones,
+                    last_value,
+                    GAMMA,
+                    GAE_LAMBDA,
+                );
+                let stats = train::ppo::update(
+                    &mut model,
+                    &mut opt,
+                    &buffer,
+                    &advantages,
+                    &returns,
+                    &ppo_cfg,
+                );
+                update_count += 1;
+                logger.log_update(
+                    total_frames as usize,
+                    stats.policy_loss,
+                    stats.value_loss,
+                    stats.entropy,
+                    stats.total_loss,
+                );
+                logger.log_explained_variance(
+                    total_frames as usize,
+                    explained_variance(&buffer.values, &returns),
+                );
+            }
+            save_checkpoint(
+                &checkpoint_dir,
+                "latest",
+                &model,
+                episode,
+                total_frames,
+                update_count,
+                best_reward,
+            );
+            break;
         }
 
         // Episode timeout — something broke, rollback latest to last good versioned checkpoint and exit
@@ -640,6 +649,7 @@ fn main() -> windows::core::Result<()> {
             TrainingConfig {
                 max_episodes: args.max_episodes,
                 max_frames: args.max_frames,
+                max_minutes: args.max_minutes,
                 debug: args.debug,
                 debug_tx,
                 checkpoint_dir,
