@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
-use ufo50ppo::game;
+use ufo50ppo::games;
+use ufo50ppo::platform;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -9,15 +10,15 @@ use ufo50ppo::util::{OBS_H, OBS_W, WINDOW_TITLE};
 const SNAP_INTERVAL: u32 = 100;
 
 // Regions from ninpek config
-const SCORE_X: u32 = game::games::ninpek::NINPEK_SCORE.region.x;
-const SCORE_Y: u32 = game::games::ninpek::NINPEK_SCORE.region.y;
-const SCORE_W: u32 = game::games::ninpek::NINPEK_SCORE.region.w;
-const SCORE_H: u32 = game::games::ninpek::NINPEK_SCORE.region.h;
+const SCORE_X: u32 = games::ninpek::NINPEK_SCORE.region.x;
+const SCORE_Y: u32 = games::ninpek::NINPEK_SCORE.region.y;
+const SCORE_W: u32 = games::ninpek::NINPEK_SCORE.region.w;
+const SCORE_H: u32 = games::ninpek::NINPEK_SCORE.region.h;
 
-const LIFE_X: u32 = game::games::ninpek::LIFE_REGION.x;
-const LIFE_Y: u32 = game::games::ninpek::LIFE_REGION.y;
-const LIFE_W: u32 = game::games::ninpek::LIFE_REGION.w;
-const LIFE_H: u32 = game::games::ninpek::LIFE_REGION.h;
+const LIFE_X: u32 = games::ninpek::LIFE_REGION.x;
+const LIFE_Y: u32 = games::ninpek::LIFE_REGION.y;
+const LIFE_W: u32 = games::ninpek::LIFE_REGION.w;
+const LIFE_H: u32 = games::ninpek::LIFE_REGION.h;
 
 // Preview window
 const PREVIEW_SCALE: u32 = 10;
@@ -217,11 +218,11 @@ fn update_preview(pixels: &[u8], src_w: u32, hwnd: HWND) {
 }
 
 fn main() -> windows::core::Result<()> {
-    game::capture::init()?;
+    platform::win32::capture::init()?;
 
     let preview_hwnd = create_preview_window()?.0 as usize;
 
-    let mut tracker = game::games::ninpek::NinpekTracker::new(OBS_W);
+    let mut tracker = games::ninpek::NinpekTracker::new(OBS_W);
     let mut total_reward = 0.0;
     let mut frame_count = 0u32;
 
@@ -231,9 +232,9 @@ fn main() -> windows::core::Result<()> {
     println!("Preview: red=score, yellow=life");
     println!("Press Ctrl+C to stop.\n");
 
-    game::capture::run(
+    platform::win32::capture::run(
         WINDOW_TITLE,
-        move |crop, frame, reader: &mut game::capture::FrameReader| {
+        move |crop, frame, reader: &mut platform::win32::capture::FrameReader| {
             let pixels = match reader.read_cropped(frame, crop, OBS_W, OBS_H) {
                 Ok(p) => p.to_vec(),
                 Err(e) => {
@@ -252,7 +253,7 @@ fn main() -> windows::core::Result<()> {
             let result = tracker.process_frame(&pixels);
             total_reward += result.reward;
 
-            use game::games::ninpek::RewardEvent;
+            use games::ninpek::RewardEvent;
             match result.event {
                 RewardEvent::Survival => {}
                 RewardEvent::ScoreUp => println!(

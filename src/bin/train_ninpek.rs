@@ -1,5 +1,7 @@
 use std::sync::mpsc;
-use ufo50ppo::game;
+use ufo50ppo::games;
+use ufo50ppo::platform;
+use ufo50ppo::platform::GameRunner;
 use ufo50ppo::train;
 use ufo50ppo::util::{OBS_H, OBS_W, WINDOW_TITLE};
 
@@ -7,7 +9,7 @@ enum DebugMsg {
     Frame(Vec<u8>),
     NewEpisode(u32),
 }
-const EXTRA_RESET_KEYS: &[usize] = &[game::input::VK_Z];
+const EXTRA_RESET_KEYS: &[usize] = &[platform::win32::input::VK_Z];
 const ROLLOUT_LEN: usize = 256;
 const SAVE_INTERVAL: u64 = 50_000;
 const LEARNING_RATE: f64 = 2.5e-4;
@@ -49,25 +51,22 @@ fn save_checkpoint(
 }
 
 /// Drain frames until a clean gameplay frame appears (skips leaderboard/completion screens).
-fn drain_until_gameplay(
-    frame_rx: &mpsc::Receiver<Vec<u8>>,
-    action_tx: &mpsc::SyncSender<usize>,
-    total_frames: &mut u64,
-) -> bool {
+fn drain_until_gameplay(runner: &mut dyn GameRunner, total_frames: &mut u64) -> bool {
+    let w = runner.obs_width();
     loop {
-        match frame_rx.recv() {
+        match runner.next_frame() {
             Ok(pixels) => {
-                let _ = action_tx.send(0);
+                runner.execute_action(0); // NOOP while draining
                 *total_frames += 1;
-                if !game::games::ninpek::is_leaderboard(&pixels, OBS_W)
-                    && !game::games::ninpek::is_stage_complete(&pixels, OBS_W)
-                    && !game::games::ninpek::is_game_complete(&pixels, OBS_W)
+                if !games::ninpek::is_leaderboard(&pixels, w)
+                    && !games::ninpek::is_stage_complete(&pixels, w)
+                    && !games::ninpek::is_game_complete(&pixels, w)
                 {
                     return true;
                 }
             }
-            Err(_) => {
-                eprintln!("Frame channel closed during drain");
+            Err(e) => {
+                eprintln!("Frame source closed during drain: {}", e);
                 return false;
             }
         }
@@ -82,12 +81,7 @@ struct TrainingConfig {
     runs_dir: String,
 }
 
-fn training_thread(
-    frame_rx: mpsc::Receiver<Vec<u8>>,
-    action_tx: mpsc::SyncSender<usize>,
-    reset_tx: mpsc::Sender<u32>,
-    cfg: TrainingConfig,
-) {
+fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
     let TrainingConfig {
         max_episodes,
         max_frames,
@@ -95,6 +89,8 @@ fn training_thread(
         checkpoint_dir,
         runs_dir,
     } = cfg;
+    let w = runner.obs_width();
+    let h = runner.obs_height();
     let device = tch::Device::cuda_if_available();
     println!("Training on: {:?}", device);
 
@@ -105,7 +101,7 @@ fn training_thread(
     let ppo_cfg = train::ppo::PpoConfig::default();
     // Training thread passes absolute total_frames as step, no offset needed
     let mut logger = ufo50ppo::util::logger::TbLogger::new(&runs_dir, 0);
-    let mut tracker = game::games::ninpek::NinpekTracker::new(OBS_W);
+    let mut tracker = games::ninpek::NinpekTracker::new(w);
 
     let mut episode = 0u32;
     let mut episode_reward = 0.0f64;
@@ -114,7 +110,7 @@ fn training_thread(
     let mut update_count = 0u64;
     let mut best_reward = f64::NEG_INFINITY;
 
-    std::fs::create_dir_all(&checkpoint_dir).ok();
+    std::fs::create_dir_all(&checkpoint_dir).expect("Failed to create checkpoint directory");
 
     // Resume from latest checkpoint if it exists
     let latest_path = format!("{}/latest.safetensors", &checkpoint_dir);
@@ -138,7 +134,7 @@ fn training_thread(
     }
 
     // Send initial NOOP to unblock first capture frame
-    let _ = action_tx.send(0);
+    runner.execute_action(0);
 
     let mut t_recv = std::time::Duration::ZERO;
     let mut t_preprocess = std::time::Duration::ZERO;
@@ -150,30 +146,28 @@ fn training_thread(
     const EPISODE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
     // Reset game before starting
-    let _ = reset_tx.send(0);
-    if !drain_until_gameplay(&frame_rx, &action_tx, &mut total_frames) {
+    runner.reset_game(EXTRA_RESET_KEYS);
+    if !drain_until_gameplay(&mut *runner, &mut total_frames) {
         return;
     }
 
     loop {
         let t0 = std::time::Instant::now();
-        let pixels = match frame_rx.recv() {
+        let pixels = match runner.next_frame() {
             Ok(p) => p,
             Err(_) => break,
         };
         t_recv += t0.elapsed();
 
         let t1 = std::time::Instant::now();
-        let obs = frame_stack.push(&pixels, OBS_W, OBS_H);
+        let obs = frame_stack.push(&pixels, w, h);
         t_preprocess += t1.elapsed();
 
         let t2 = std::time::Instant::now();
         let (action, log_prob, value) = model.act(&obs);
         t_act += t2.elapsed();
 
-        if action_tx.send(action as usize).is_err() {
-            break;
-        }
+        runner.execute_action(action as usize);
 
         let t3 = std::time::Instant::now();
         let result = tracker.process_frame(&pixels);
@@ -284,7 +278,7 @@ fn training_thread(
 
         // Live status line
         if episode_frames % 10 == 0 {
-            use game::games::ninpek::RewardEvent;
+            use games::ninpek::RewardEvent;
             let event = match result.event {
                 RewardEvent::ScoreUp => "SCORE",
                 RewardEvent::LifeGained => "LIFE+",
@@ -300,7 +294,7 @@ fn training_thread(
 
         // Episode end
         if done {
-            use game::games::ninpek::RewardEvent;
+            use games::ninpek::RewardEvent;
             let reason = match result.event {
                 RewardEvent::GameOver => "GAME OVER",
                 RewardEvent::GameComplete => "WIN",
@@ -334,15 +328,15 @@ fn training_thread(
             }
 
             // Signal capture thread to reset game
-            let _ = reset_tx.send(episode + 1);
+            runner.reset_game(EXTRA_RESET_KEYS);
 
-            if !drain_until_gameplay(&frame_rx, &action_tx, &mut total_frames) {
+            if !drain_until_gameplay(&mut *runner, &mut total_frames) {
                 return;
             }
 
             // Reset for new episode
             frame_stack.reset();
-            tracker = game::games::ninpek::NinpekTracker::new(OBS_W);
+            tracker = games::ninpek::NinpekTracker::new(OBS_W);
             episode += 1;
             if let Some(ref dtx) = debug_tx {
                 let _ = dtx.try_send(DebugMsg::NewEpisode(episode));
@@ -449,26 +443,18 @@ fn main() -> windows::core::Result<()> {
             .ok();
     }
 
-    game::capture::init()?;
+    let (runner, main_loop) = platform::win32::Win32Runner::new(WINDOW_TITLE, OBS_W, OBS_H)?;
 
-    let mut input = game::input::Input::new(WINDOW_TITLE)?;
-
-    // Channels
-    let (frame_tx, frame_rx) = mpsc::sync_channel::<Vec<u8>>(1);
-    let (action_tx, action_rx) = mpsc::sync_channel::<usize>(1);
-    let (reset_tx, reset_rx) = mpsc::channel::<u32>(); // sends new episode number
     let debug_tx = if args.debug {
         Some(spawn_debug_thread())
     } else {
         None
     };
 
-    // Spawn training thread
+    // Spawn training thread — uses GameRunner trait, platform-agnostic
     std::thread::spawn(move || {
         training_thread(
-            frame_rx,
-            action_tx,
-            reset_tx,
+            Box::new(runner),
             TrainingConfig {
                 max_episodes: args.max_episodes,
                 max_frames: args.max_frames,
@@ -491,36 +477,6 @@ fn main() -> windows::core::Result<()> {
     }
     println!();
 
-    game::capture::run(
-        WINDOW_TITLE,
-        move |crop, frame, reader: &mut game::capture::FrameReader| {
-            // Check for reset signal (non-blocking)
-            if let Ok(_) = reset_rx.try_recv() {
-                input.release_all();
-                input.reset_game(EXTRA_RESET_KEYS);
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-
-            // Wait for action from training thread
-            let action = match action_rx.recv() {
-                Ok(a) => a,
-                Err(_) => return false,
-            };
-
-            // Execute action
-            input.execute_action(action);
-
-            // Read pixels
-            let pixels = match reader.read_cropped(frame, crop, OBS_W, OBS_H) {
-                Ok(p) => p.to_vec(),
-                Err(e) => {
-                    eprintln!("read error: {}", e);
-                    return true;
-                }
-            };
-
-            // Send to training thread
-            frame_tx.send(pixels).is_ok()
-        },
-    )
+    // Win32 message pump must run on main thread
+    main_loop()
 }

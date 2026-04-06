@@ -1,10 +1,10 @@
-use ufo50ppo::game;
+use ufo50ppo::platform;
 use ufo50ppo::util::{OBS_H, OBS_W, WINDOW_TITLE};
 
 fn main() -> windows::core::Result<()> {
-    game::capture::init()?;
+    platform::win32::capture::init()?;
 
-    let mut input = game::input::Input::new(WINDOW_TITLE)?;
+    let mut input = platform::win32::input::Input::new(WINDOW_TITLE)?;
 
     let mut frame_count = 0u32;
     let mut snap_count = 0u32;
@@ -13,9 +13,9 @@ fn main() -> windows::core::Result<()> {
 
     std::fs::create_dir_all("debug_frames").ok();
 
-    game::capture::run(
+    platform::win32::capture::run(
         WINDOW_TITLE,
-        move |crop, frame, reader: &mut game::capture::FrameReader| {
+        move |crop, frame, reader: &mut platform::win32::capture::FrameReader| {
             if let Err(e) = reader.read_cropped(frame, crop, OBS_W, OBS_H) {
                 eprintln!("read error: {}", e);
                 return true;

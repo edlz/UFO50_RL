@@ -1,6 +1,6 @@
 use tch::{Device, Kind, Tensor, nn, nn::Module, nn::OptimizerConfig};
 
-use crate::game::input::NUM_ACTIONS;
+use crate::platform::NUM_ACTIONS;
 
 pub struct ActorCritic {
     pub vs: nn::VarStore,

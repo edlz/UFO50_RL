@@ -11,7 +11,7 @@ pub const VK_Z: usize = 0x5A; // A button
 pub const VK_X: usize = 0x58; // B button
 pub const VK_ESCAPE: usize = 0x1B; // Start (reset only, not used in training)
 
-const ACTION_MAP: &[&[usize]] = &[
+pub(crate) const ACTION_MAP: &[&[usize]] = &[
     &[],                        // 0: NOOP
     &[VK_UP],                   // 1: Up
     &[VK_DOWN],                 // 2: Down
@@ -40,40 +40,11 @@ const ACTION_MAP: &[&[usize]] = &[
     &[VK_DOWN, VK_LEFT, VK_X],  // 25: Down-Left + B
 ];
 
-pub const NUM_ACTIONS: usize = 26;
-
-pub const ACTION_NAMES: &[&str] = &[
-    "NOOP",
-    "Up",
-    "Down",
-    "Left",
-    "Right",
-    "Up-Right",
-    "Up-Left",
-    "Down-Right",
-    "Down-Left",
-    "A",
-    "B",
-    "Up+A",
-    "Up+B",
-    "Down+A",
-    "Left+A",
-    "Right+A",
-    "Left+B",
-    "Right+B",
-    "Up-Right+A",
-    "Up-Right+B",
-    "Up-Left+A",
-    "Up-Left+B",
-    "Down-Right+A",
-    "Down-Right+B",
-    "Down-Left+A",
-    "Down-Left+B",
-];
+use super::super::NUM_ACTIONS;
 
 pub struct Input {
-    hwnd: HWND,
-    held: [bool; 256],
+    pub(crate) hwnd: HWND,
+    pub(crate) held: [bool; 256],
 }
 
 // SAFETY: HWND is a Win32 handle (opaque integer), safe to send across threads.
@@ -91,15 +62,12 @@ impl Input {
 
     pub fn execute_action(&mut self, action: usize) {
         let keys = ACTION_MAP[action.min(NUM_ACTIONS - 1)];
-
-        // Release keys not in the new action
         for vk in 0..256 {
             if self.held[vk] && !keys.contains(&vk) {
                 self.post_key(vk, true);
                 self.held[vk] = false;
             }
         }
-        // Press keys not already held
         for &vk in keys {
             if !self.held[vk] {
                 self.post_key(vk, false);
@@ -117,16 +85,6 @@ impl Input {
         }
     }
 
-    /// Tap a key: press, wait, release, wait.
-    fn tap_key(&self, vk: usize, delay_ms: u64) {
-        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-        self.post_key(vk, false);
-        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-        self.post_key(vk, true);
-    }
-
-    /// Reset the game: Start (Esc) to open menu, Down to select, A to confirm,
-    /// then tap any additional keys provided.
     pub fn reset_game(&mut self, extra_keys: &[usize]) {
         self.release_all();
         self.tap_key(VK_ESCAPE, 50);
@@ -138,12 +96,18 @@ impl Input {
         }
     }
 
-    fn post_key(&self, vk: usize, up: bool) {
+    pub(crate) fn tap_key(&self, vk: usize, delay_ms: u64) {
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        self.post_key(vk, false);
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        self.post_key(vk, true);
+    }
+
+    pub(crate) fn post_key(&self, vk: usize, up: bool) {
         let msg = if up { WM_KEYUP } else { WM_KEYDOWN };
-        // lParam: repeat=1, scancode, extended flag, previous state
         let scan = unsafe { MapVirtualKeyA(vk as u32, MAPVK_VK_TO_VSC) };
         let mut lparam = 1u32 | (scan << 16);
-        const KEYUP_LPARAM: u32 = 0xC0000000; // WM_KEYUP: transition + previous-state bits
+        const KEYUP_LPARAM: u32 = 0xC0000000;
         if up {
             lparam |= KEYUP_LPARAM;
         }

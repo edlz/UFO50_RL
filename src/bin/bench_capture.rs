@@ -1,4 +1,4 @@
-use ufo50ppo::game;
+use ufo50ppo::platform;
 use ufo50ppo::util::WINDOW_TITLE;
 const BENCH_FRAMES: u32 = 300;
 const SIZES: &[(u32, u32)] = &[
@@ -12,7 +12,7 @@ const SIZES: &[(u32, u32)] = &[
 ];
 
 fn main() -> windows::core::Result<()> {
-    game::capture::init()?;
+    platform::win32::capture::init()?;
 
     let mut size_idx = 0;
     let mut frame_count = 0u32;
@@ -29,9 +29,9 @@ fn main() -> windows::core::Result<()> {
         "Size", "Total(ms)", "Avg(us)", "FPS"
     );
 
-    game::capture::run(
+    platform::win32::capture::run(
         WINDOW_TITLE,
-        move |crop, frame, reader: &mut game::capture::FrameReader| {
+        move |crop, frame, reader: &mut platform::win32::capture::FrameReader| {
             if size_idx >= SIZES.len() {
                 return false;
             }
