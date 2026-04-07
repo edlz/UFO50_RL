@@ -1,4 +1,5 @@
 use std::io::{Read, Write};
+use tch::nn::VarStore;
 
 pub struct CheckpointMeta {
     pub game: &'static str,
@@ -53,6 +54,21 @@ pub struct ResumedState {
     pub total_frames: u64,
     pub ppo_updates: u64,
     pub best_reward: f64,
+}
+
+/// Try to load both model weights and metadata for a checkpoint.
+/// - `Ok(None)` — `.safetensors` file doesn't exist (fresh start)
+/// - `Ok(Some(state))` — both files loaded successfully
+/// - `Err(msg)` — `.safetensors` exists but couldn't be loaded, or metadata is missing/unparseable
+pub fn try_load(dir: &str, name: &str, vs: &mut VarStore) -> Result<Option<ResumedState>, String> {
+    let path = format!("{}/{}.safetensors", dir, name);
+    if !std::path::Path::new(&path).exists() {
+        return Ok(None);
+    }
+    vs.load(&path).map_err(|e| format!("load weights: {}", e))?;
+    let state = load_metadata(dir, name)
+        .ok_or_else(|| format!("metadata missing or unparseable: {}/{}.json", dir, name))?;
+    Ok(Some(state))
 }
 
 /// Try to load metadata from a checkpoint JSON file.

@@ -226,7 +226,7 @@ impl GameTracker for NinpekTracker {
     }
 
     fn extra_reset_keys(&self) -> &[usize] {
-        &[VK_Z]
+        &[VK_Z, VK_Z]
     }
 
     fn game_name(&self) -> &str {

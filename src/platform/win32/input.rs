@@ -88,8 +88,7 @@ impl Input {
     pub fn reset_game(&mut self, extra_keys: &[usize]) {
         self.release_all();
         self.tap_key(VK_ESCAPE, 50);
-        self.tap_key(VK_DOWN, 50);
-        self.tap_key(VK_Z, 50);
+        self.tap_key(VK_DOWN, 30);
         self.tap_key(VK_Z, 50);
         for &vk in extra_keys {
             self.tap_key(vk, 100);

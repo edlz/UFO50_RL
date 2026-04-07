@@ -7,14 +7,17 @@ use ufo50ppo::train;
 use ufo50ppo::util::{OBS_H, OBS_W, WINDOW_TITLE};
 
 enum DebugMsg {
-    Frame(Vec<u8>),
+    Frame(Vec<u8>, &'static str),
     NewEpisode(u32),
 }
-const ROLLOUT_LEN: usize = 256;
-const SAVE_INTERVAL: u64 = 50_000;
-const LEARNING_RATE: f64 = 2.5e-4;
+const ROLLOUT_LEN: usize = 1024;
+const LATEST_SAVE_INTERVAL: u64 = 10_000;
+const VERSIONED_SAVE_INTERVAL: u64 = 250_000;
+const LEARNING_RATE: f64 = 3e-4;
 const GAMMA: f64 = 0.99;
 const GAE_LAMBDA: f64 = 0.95;
+
+const EPISODE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 use ufo50ppo::util::checkpoint::{self, CheckpointMeta};
 
@@ -102,6 +105,7 @@ struct TrainingConfig {
     max_episodes: Option<u32>,
     max_frames: Option<u64>,
     max_minutes: Option<u64>,
+    auto_resume: bool,
     debug: bool,
     debug_tx: Option<mpsc::SyncSender<DebugMsg>>,
     checkpoint_dir: String,
@@ -113,6 +117,7 @@ fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
         max_episodes,
         max_frames,
         max_minutes,
+        auto_resume,
         debug,
         debug_tx,
         checkpoint_dir,
@@ -129,7 +134,10 @@ fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
     let mut opt = model.optimizer(LEARNING_RATE);
     let mut frame_stack = train::preprocess::FrameStack::new(device);
     let mut buffer = train::ppo::RolloutBuffer::new(ROLLOUT_LEN);
-    let ppo_cfg = train::ppo::PpoConfig::default();
+    let ppo_cfg = train::ppo::PpoConfig {
+        minibatch_size: 128,
+        ..train::ppo::PpoConfig::default()
+    };
     // Training thread passes absolute total_frames as step, no offset needed
     let mut logger = ufo50ppo::util::logger::TbLogger::new(&runs_dir, 0);
     let mut tracker = games::ninpek::NinpekTracker::new(w);
@@ -148,24 +156,19 @@ fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
     std::fs::create_dir_all(&checkpoint_dir).expect("Failed to create checkpoint directory");
 
     // Resume from latest checkpoint if it exists
-    let latest_path = format!("{}/latest.safetensors", &checkpoint_dir);
-    if std::path::Path::new(&latest_path).exists() {
-        match model.vs.load(&latest_path) {
-            Ok(()) => {
-                println!("Loaded {}", latest_path);
-                if let Some(state) = checkpoint::load_metadata(&checkpoint_dir, "latest") {
-                    episode = state.episode;
-                    total_frames = state.total_frames;
-                    update_count = state.ppo_updates;
-                    best_reward = state.best_reward;
-                    println!(
-                        "  Resuming: ep={} frames={} updates={} best={:.1}",
-                        episode, total_frames, update_count, best_reward
-                    );
-                }
-            }
-            Err(e) => eprintln!("Failed to load model: {}", e),
+    match checkpoint::try_load(&checkpoint_dir, "latest", &mut model.vs) {
+        Ok(Some(state)) => {
+            episode = state.episode;
+            total_frames = state.total_frames;
+            update_count = state.ppo_updates;
+            best_reward = state.best_reward;
+            println!(
+                "Resuming: ep={} frames={} updates={} best={:.1}",
+                episode, total_frames, update_count, best_reward
+            );
         }
+        Ok(None) => {}
+        Err(e) => eprintln!("Failed to load latest checkpoint: {}", e),
     }
 
     // Send initial NOOP to unblock first capture frame
@@ -177,8 +180,30 @@ fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
     let mut t_tracker = std::time::Duration::ZERO;
     let mut t_ppo = std::time::Duration::ZERO;
     let mut timing_frames = 0u32;
+    let mut last_timing_print = std::time::Instant::now();
     let mut episode_start = std::time::Instant::now();
-    const EPISODE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+    macro_rules! reset_episode_state {
+        () => {{
+            runner.reset_game(tracker.extra_reset_keys());
+            if !drain_until_gameplay(&mut *runner, &tracker, &mut total_frames) {
+                return;
+            }
+            frame_stack.reset();
+            tracker = games::ninpek::NinpekTracker::new(w);
+            episode += 1;
+            if let Some(ref dtx) = debug_tx {
+                let _ = dtx.try_send(DebugMsg::NewEpisode(episode));
+            }
+            episode_reward = 0.0;
+            episode_frames = 0;
+            ep_scores = 0;
+            ep_life_gained = 0;
+            ep_life_lost = 0;
+            ep_survival = 0.0;
+            episode_start = std::time::Instant::now();
+        }};
+    }
 
     // Reset game before starting
     runner.reset_game(tracker.extra_reset_keys());
@@ -228,23 +253,7 @@ fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
                     );
                     println!("  New best: {:+.1}", best_reward);
                 }
-                runner.reset_game(tracker.extra_reset_keys());
-                if !drain_until_gameplay(&mut *runner, &tracker, &mut total_frames) {
-                    return;
-                }
-                frame_stack.reset();
-                tracker = games::ninpek::NinpekTracker::new(w);
-                episode += 1;
-                if let Some(ref dtx) = debug_tx {
-                    let _ = dtx.try_send(DebugMsg::NewEpisode(episode));
-                }
-                episode_reward = 0.0;
-                episode_frames = 0;
-                ep_scores = 0;
-                ep_life_gained = 0;
-                ep_life_lost = 0;
-                ep_survival = 0.0;
-                episode_start = std::time::Instant::now();
+                reset_episode_state!();
                 // Run PPO on partial rollout before clearing
                 if buffer.len() >= 32 {
                     let last_value = 0.0; // episode ended
@@ -368,28 +377,40 @@ fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
             break;
         }
 
-        // Episode timeout — something broke, rollback latest to last good versioned checkpoint and exit
+        // Episode timeout — reload latest checkpoint and resume (or exit)
         if episode_start.elapsed() > EPISODE_TIMEOUT {
             eprintln!(
-                "\rEpisode {:4} TIMEOUT after {:?} — invalidating latest, restoring last good checkpoint",
+                "\rEpisode {:4} TIMEOUT after {:?}",
                 episode,
                 episode_start.elapsed()
             );
-            if update_count > 0 {
-                let rollback_name = format!("update_{:06}", update_count.saturating_sub(1));
-                let rollback_path = format!("{}/{}.safetensors", &checkpoint_dir, rollback_name);
-                if std::path::Path::new(&rollback_path).exists() {
-                    // Overwrite latest with the last good versioned checkpoint
-                    let latest_path = format!("{}/latest.safetensors", &checkpoint_dir);
-                    std::fs::copy(&rollback_path, &latest_path).ok();
-                    let rollback_json = format!("{}/{}.json", &checkpoint_dir, rollback_name);
-                    let latest_json = format!("{}/latest.json", &checkpoint_dir);
-                    std::fs::copy(&rollback_json, &latest_json).ok();
-                    eprintln!("  Restored latest from {}", rollback_name);
+            if !auto_resume {
+                eprintln!("Exiting due to timeout.");
+                return;
+            }
+            match checkpoint::try_load(&checkpoint_dir, "latest", &mut model.vs) {
+                Ok(Some(state)) => {
+                    episode = state.episode;
+                    total_frames = state.total_frames;
+                    update_count = state.ppo_updates;
+                    best_reward = state.best_reward;
+                    eprintln!(
+                        "  Reloaded latest: ep={} frames={} updates={}",
+                        episode, total_frames, update_count
+                    );
+                }
+                Ok(None) => {
+                    eprintln!("  No latest checkpoint to reload, exiting.");
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("  Failed to reload latest: {}", e);
+                    return;
                 }
             }
-            eprintln!("Exiting due to timeout.");
-            return;
+            buffer.clear();
+            reset_episode_state!();
+            continue;
         }
 
         // Store in rollout buffer
@@ -436,11 +457,11 @@ fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
         }
 
         if let Some(ref dtx) = debug_tx {
-            let _ = dtx.try_send(DebugMsg::Frame(pixels));
+            let _ = dtx.try_send(DebugMsg::Frame(pixels, result.event_name));
         }
 
-        // Print timing stats every 500 frames
-        if timing_frames == 500 {
+        // Print timing metrics once ever 5 minutes
+        if timing_frames > 0 && last_timing_print.elapsed() >= std::time::Duration::from_secs(300) {
             let n = timing_frames as f64;
             println!(
                 "\r[timing] recv: {:.1}ms  preprocess: {:.1}ms  act: {:.1}ms  tracker: {:.1}ms  ppo: {:.1}ms (per frame avg)     ",
@@ -458,6 +479,7 @@ fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
             t_tracker = std::time::Duration::ZERO;
             t_ppo = std::time::Duration::ZERO;
             timing_frames = 0;
+            last_timing_print = std::time::Instant::now();
         }
 
         // Live status line
@@ -505,27 +527,7 @@ fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
                 println!("  New best: {:+.1}", best_reward);
             }
 
-            // Signal capture thread to reset game
-            runner.reset_game(tracker.extra_reset_keys());
-
-            if !drain_until_gameplay(&mut *runner, &tracker, &mut total_frames) {
-                return;
-            }
-
-            // Reset for new episode
-            frame_stack.reset();
-            tracker = games::ninpek::NinpekTracker::new(w);
-            episode += 1;
-            if let Some(ref dtx) = debug_tx {
-                let _ = dtx.try_send(DebugMsg::NewEpisode(episode));
-            }
-            episode_reward = 0.0;
-            episode_frames = 0;
-            ep_scores = 0;
-            ep_life_gained = 0;
-            ep_life_lost = 0;
-            ep_survival = 0.0;
-            episode_start = std::time::Instant::now();
+            reset_episode_state!();
 
             if let Some(max) = max_episodes {
                 if episode >= max {
@@ -544,8 +546,8 @@ fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
             }
         }
 
-        // Periodic save: latest + versioned checkpoint
-        if total_frames % SAVE_INTERVAL == 0 && total_frames > 0 {
+        // Periodic save: latest (frequent, for recovery) and versioned (sparse, for archival)
+        if total_frames > 0 && total_frames % LATEST_SAVE_INTERVAL == 0 {
             save_checkpoint(
                 &checkpoint_dir,
                 "latest",
@@ -555,9 +557,11 @@ fn training_thread(mut runner: Box<dyn GameRunner>, cfg: TrainingConfig) {
                 update_count,
                 best_reward,
             );
+        }
+        if total_frames > 0 && total_frames % VERSIONED_SAVE_INTERVAL == 0 {
             save_checkpoint(
                 &checkpoint_dir,
-                &format!("update_{:06}", update_count),
+                &format!("frame_{:08}", total_frames),
                 &model,
                 episode,
                 total_frames,
@@ -587,8 +591,17 @@ fn spawn_debug_thread() -> mpsc::SyncSender<DebugMsg> {
                     frame = 0;
                     std::fs::create_dir_all(format!("debug_frames/ep_{:04}", ep)).ok();
                 }
-                DebugMsg::Frame(pixels) => {
-                    let path = format!("debug_frames/ep_{:04}/{:05}.bmp", ep, frame);
+                DebugMsg::Frame(pixels, event) => {
+                    let path = if event == "SCORE" {
+                        format!(
+                            "debug_frames/ep_{:04}/{:05}_+{}.bmp",
+                            ep,
+                            frame,
+                            games::ninpek::rewards::SCORE_UP as i64
+                        )
+                    } else {
+                        format!("debug_frames/ep_{:04}/{:05}.bmp", ep, frame)
+                    };
                     if let Ok(mut f) = std::fs::File::create(&path) {
                         use std::io::Write;
                         let _ = f.write_all(b"BM");
@@ -650,6 +663,7 @@ fn main() -> windows::core::Result<()> {
                 max_episodes: args.max_episodes,
                 max_frames: args.max_frames,
                 max_minutes: args.max_minutes,
+                auto_resume: args.auto_resume,
                 debug: args.debug,
                 debug_tx,
                 checkpoint_dir,
