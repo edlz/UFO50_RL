@@ -103,32 +103,3 @@ pub fn is_stage_complete(bgra: &[u8], width: u32) -> bool {
 pub fn is_game_complete(bgra: &[u8], width: u32) -> bool {
     is_completion_screen(bgra, width) && upper_content(bgra, width) > 80
 }
-
-/// Game selection menu: colored content in center (y=28-56) but no HUD at top (y=0-20)
-/// and no game world at bottom (y=104+).
-pub fn is_game_menu(bgra: &[u8], width: u32) -> bool {
-    if !valid_buf(bgra, width) {
-        return false;
-    }
-    // Check for center content (menu items)
-    let mut center_content = 0u32;
-    for y in 28..57 {
-        for x in 0..width {
-            let i = (y * width + x) as usize * 4;
-            if bgra[i] > 30 || bgra[i + 1] > 30 || bgra[i + 2] > 30 {
-                center_content += 1;
-            }
-        }
-    }
-    // Check bottom is mostly empty (no game world)
-    let mut bottom_content = 0u32;
-    for y in 104..width.min(128) {
-        for x in 0..width {
-            let i = (y * width + x) as usize * 4;
-            if bgra[i] > 30 || bgra[i + 1] > 30 || bgra[i + 2] > 30 {
-                bottom_content += 1;
-            }
-        }
-    }
-    center_content > 500 && bottom_content < 50
-}

@@ -19,7 +19,7 @@ fn main() -> windows::core::Result<()> {
                 VK_DOWN,
                 VK_Z,
                 VK_Z,
-                vk_noop(700),
+                vk_noop(800),
                 VK_Z,
                 vk_noop(700),
                 VK_Z,

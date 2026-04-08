@@ -25,8 +25,16 @@ pub trait GameTracker: Send {
     /// Process a frame and return reward/done/event info.
     fn process_frame(&mut self, pixels: &[u8]) -> FrameResult;
 
-    /// Returns true if this frame is a non-gameplay screen (menu, leaderboard, loading, etc).
-    fn is_menu_screen(&self, pixels: &[u8]) -> bool;
+    /// Update internal state from a post-reset frame and return whether the game has
+    /// reached a fresh playable state. Default returns true
+    /// immediately for games without idle-state detection.
+    fn observe_idle(&mut self, _pixels: &[u8]) -> bool {
+        true
+    }
+
+    /// Reset per-episode state (counters, pending flags, cached game state) without
+    /// reconstructing expensive resources like memory readers or capture handles.
+    fn reset_episode(&mut self) {}
 
     /// Full reset sequence: keys to tap, with `vk_noop(ms)` for waits between presses.
     fn reset_sequence(&self) -> &[usize];

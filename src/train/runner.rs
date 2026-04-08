@@ -10,7 +10,6 @@ pub struct Hyperparams {
     pub learning_rate: f64,
     pub gamma: f64,
     pub gae_lambda: f64,
-    pub episode_timeout_secs: u64,
     pub latest_save_interval: u64,
     pub versioned_save_interval: u64,
 }
@@ -23,7 +22,6 @@ impl Default for Hyperparams {
             learning_rate: 3e-4,
             gamma: 0.99,
             gae_lambda: 0.95,
-            episode_timeout_secs: 60,
             latest_save_interval: 10_000,
             versioned_save_interval: 250_000,
         }
@@ -40,8 +38,6 @@ pub struct GameDefinition {
     pub num_actions: usize,
     pub make_tracker: fn(u32) -> Box<dyn GameTracker>,
     pub hyperparams: Hyperparams,
-    /// Compute a debug filename suffix for a frame given its event name and reward.
-    /// Returns empty string for frames that shouldn't be tagged.
     pub debug_frame_suffix: fn(event: &str, reward: f64) -> String,
 }
 
@@ -248,26 +244,37 @@ fn run_ppo_update(
     logger.log_explained_variance(total_frames as usize, ev);
 }
 
-fn drain_until_gameplay(
+const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+
+/// Drain post-reset frames with noop input until the tracker reports a fresh playable
+/// state. Returns false on timeout — caller routes through the auto-resume path.
+fn drain_until_idle(
     runner: &mut dyn GameRunner,
-    tracker: &dyn GameTracker,
+    tracker: &mut dyn GameTracker,
     total_frames: &mut u64,
+    timeout: std::time::Duration,
 ) -> bool {
-    loop {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
         match runner.next_frame() {
             Ok(pixels) => {
                 runner.execute_action(0);
                 *total_frames += 1;
-                if !tracker.is_menu_screen(&pixels) {
+                if tracker.observe_idle(&pixels) {
                     return true;
                 }
             }
             Err(e) => {
-                eprintln!("Frame source closed during drain: {}", e);
+                eprintln!("Frame source closed during idle drain: {}", e);
                 return false;
             }
         }
     }
+    eprintln!(
+        "Idle drain exceeded {:?} — reset key sequence likely missed the game window",
+        timeout
+    );
+    false
 }
 
 pub fn run_training(
@@ -293,7 +300,6 @@ pub fn run_training(
     println!("Training on: {:?}", device);
 
     let hp = &game.hyperparams;
-    let episode_timeout = std::time::Duration::from_secs(hp.episode_timeout_secs);
 
     let mut model =
         train::model::ActorCritic::new(device, game.obs_width, game.obs_height, game.num_actions);
@@ -346,23 +352,69 @@ pub fn run_training(
     let mut t_ppo = std::time::Duration::ZERO;
     let mut timing_frames = 0u32;
     let mut last_timing_print = std::time::Instant::now();
-    let mut episode_start = std::time::Instant::now();
+
+    macro_rules! reload_latest {
+        () => {{
+            match checkpoint::try_load(&checkpoint_dir, "latest", &mut model.vs) {
+                Ok(Some(state)) => {
+                    episode = state.episode;
+                    total_frames = state.total_frames;
+                    update_count = state.ppo_updates;
+                    best_reward = state.best_reward;
+                    eprintln!(
+                        "  Reloaded latest: ep={} frames={} updates={}",
+                        episode, total_frames, update_count
+                    );
+                }
+                Ok(None) => {
+                    eprintln!("  No latest checkpoint to reload, exiting.");
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("  Failed to reload latest: {}", e);
+                    return;
+                }
+            }
+            // Adam moments are stale after vs.load — rebuild to match the freshly loaded weights.
+            opt = model.optimizer(hp.learning_rate);
+            buffer.clear();
+        }};
+    }
+
+    macro_rules! drain_with_auto_resume {
+        () => {{
+            loop {
+                if drain_until_idle(
+                    &mut *runner,
+                    &mut *tracker,
+                    &mut total_frames,
+                    DRAIN_TIMEOUT,
+                ) {
+                    break;
+                }
+                if !auto_resume {
+                    eprintln!("Exiting due to drain timeout.");
+                    return;
+                }
+                reload_latest!();
+                runner.reset_game(tracker.reset_sequence(), tracker.reset_tap_ms());
+                tracker.reset_episode();
+            }
+        }};
+    }
 
     macro_rules! reset_episode_state {
         () => {{
             runner.reset_game(tracker.reset_sequence(), tracker.reset_tap_ms());
-            if !drain_until_gameplay(&mut *runner, &*tracker, &mut total_frames) {
-                return;
-            }
+            tracker.reset_episode();
+            drain_with_auto_resume!();
             frame_stack.reset();
-            tracker = (game.make_tracker)(w);
             episode += 1;
             if let Some(ref dtx) = debug_tx {
                 let _ = dtx.try_send(DebugMsg::NewEpisode(episode));
             }
             episode_reward = 0.0;
             episode_frames = 0;
-            episode_start = std::time::Instant::now();
             prev = None;
             best_frames_buf.clear();
         }};
@@ -440,9 +492,7 @@ pub fn run_training(
     }
 
     runner.reset_game(tracker.reset_sequence(), tracker.reset_tap_ms());
-    if !drain_until_gameplay(&mut *runner, &*tracker, &mut total_frames) {
-        return;
-    }
+    drain_with_auto_resume!();
 
     loop {
         let t0 = std::time::Instant::now();
@@ -552,43 +602,6 @@ pub fn run_training(
                 best_reward,
             );
             break;
-        }
-
-        if episode_start.elapsed() > episode_timeout {
-            eprintln!(
-                "\rEpisode {:4} TIMEOUT after {:?}",
-                episode,
-                episode_start.elapsed()
-            );
-            if !auto_resume {
-                eprintln!("Exiting due to timeout.");
-                return;
-            }
-            match checkpoint::try_load(&checkpoint_dir, "latest", &mut model.vs) {
-                Ok(Some(state)) => {
-                    episode = state.episode;
-                    total_frames = state.total_frames;
-                    update_count = state.ppo_updates;
-                    best_reward = state.best_reward;
-                    eprintln!(
-                        "  Reloaded latest: ep={} frames={} updates={}",
-                        episode, total_frames, update_count
-                    );
-                }
-                Ok(None) => {
-                    eprintln!("  No latest checkpoint to reload, exiting.");
-                    return;
-                }
-                Err(e) => {
-                    eprintln!("  Failed to reload latest: {}", e);
-                    return;
-                }
-            }
-            // Adam moments are stale after vs.load — rebuild to match the freshly loaded weights.
-            opt = model.optimizer(hp.learning_rate);
-            buffer.clear();
-            reset_episode_state!();
-            continue;
         }
 
         timing_frames += 1;

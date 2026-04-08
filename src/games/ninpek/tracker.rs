@@ -1,25 +1,25 @@
 use super::super::{FrameResult, GameTracker};
-use super::NINPEK_SCORE;
 use super::events;
 use super::game_over;
-use super::lives;
+use super::mem::MemReader;
 use super::rewards;
-use super::score;
 use crate::platform::NUM_ACTIONS;
 use crate::platform::win32::input::{VK_DOWN, VK_ESCAPE, VK_Z, vk_noop};
 
+fn update_field(field: &mut Option<u64>, new: Option<f64>) {
+    if let Some(v) = new {
+        *field = Some(v as u64);
+    }
+}
+
 pub struct NinpekTracker {
-    prev_valid: bool,
-    committed_lives: Option<u32>,
-    pending_lives: Option<(u32, Vec<u8>)>,
-    committed_score: Option<Vec<u8>>,
-    pending_score: Option<Vec<u8>>,
+    mem_reader: MemReader,
+    last_mem_score: Option<u64>,
+    last_mem_lives: Option<u64>,
     game_over_pending: bool,
     stage_complete_pending: bool,
     stage_complete_rewarded: bool,
     game_complete_pending: bool,
-    life_pixels: Vec<u8>,
-    score_pixels: Vec<u8>,
     width: u32,
     ep_scores: u32,
     ep_life_gained: u32,
@@ -28,23 +28,26 @@ pub struct NinpekTracker {
 }
 
 impl NinpekTracker {
+    pub fn mem_score(&self) -> Option<u64> {
+        self.last_mem_score
+    }
+
+    pub fn mem_lives(&self) -> Option<u64> {
+        self.last_mem_lives
+    }
+
     pub fn new(width: u32) -> Self {
+        let mem_reader = MemReader::new(super::WINDOW_TITLE)
+            .unwrap_or_else(|e| panic!("MemReader::new failed: {}", e));
+        println!("[mem] attached to ufo50.exe");
         Self {
-            prev_valid: false,
-            committed_lives: None,
-            pending_lives: None,
-            committed_score: None,
-            pending_score: None,
+            mem_reader,
+            last_mem_score: None,
+            last_mem_lives: None,
             game_over_pending: false,
             stage_complete_pending: false,
             stage_complete_rewarded: false,
             game_complete_pending: false,
-            life_pixels: Vec::with_capacity(
-                lives::LIFE_REGION.w as usize * lives::LIFE_REGION.h as usize * 4,
-            ),
-            score_pixels: Vec::with_capacity(
-                NINPEK_SCORE.region.w as usize * NINPEK_SCORE.region.h as usize * 3,
-            ),
             width,
             ep_scores: 0,
             ep_life_gained: 0,
@@ -53,15 +56,35 @@ impl NinpekTracker {
         }
     }
 
+    /// Read score and lives from process memory and update cached values. Returns
+    /// `(prev_score, prev_lives)` so callers that care about deltas can compute them.
+    fn refresh_mem_state(&mut self) -> (Option<u64>, Option<u64>) {
+        let prev = (self.last_mem_score, self.last_mem_lives);
+        let (score, lives) = self.mem_reader.read_both();
+        update_field(&mut self.last_mem_score, score);
+        update_field(&mut self.last_mem_lives, lives);
+        prev
+    }
+
     fn process_frame_inner(&mut self, pixels: &[u8]) -> FrameResult {
         let w = self.width;
+        let (prev_score, prev_lives) = self.refresh_mem_state();
 
-        // Compute menu detectors once. Used by the state machines below AND returned in
-        // FrameResult.is_menu so the runner doesn't need a separate is_menu_screen call.
         let leaderboard = game_over::is_leaderboard(pixels, w);
-        let completion = game_over::is_stage_complete(pixels, w);
-        let game_win = game_over::is_game_complete(pixels, w);
-        let is_menu = leaderboard || completion || game_win || game_over::is_game_menu(pixels, w);
+        let completion = !leaderboard && game_over::is_stage_complete(pixels, w);
+        let game_win = !leaderboard && !completion && game_over::is_game_complete(pixels, w);
+        let is_menu = leaderboard || completion || game_win;
+
+        let score_delta = match (prev_score, self.last_mem_score) {
+            (Some(p), Some(c)) => c as i64 - p as i64,
+            _ => 0,
+        };
+        let lives_delta = match (prev_lives, self.last_mem_lives) {
+            (Some(p), Some(c)) => c as i64 - p as i64,
+            _ => 0,
+        };
+
+        let curr_lives = self.last_mem_lives.unwrap_or(0) as u32;
 
         if leaderboard {
             if self.game_over_pending {
@@ -84,7 +107,7 @@ impl NinpekTracker {
                 return FrameResult {
                     reward: rewards::STAGE_COMPLETE,
                     event_name: events::WIN,
-                    lives: self.committed_lives.unwrap_or(0),
+                    lives: curr_lives,
                     done: true,
                     is_event: true,
                     is_menu,
@@ -101,7 +124,7 @@ impl NinpekTracker {
                 return FrameResult {
                     reward: rewards::STAGE_COMPLETE,
                     event_name: events::STAGE,
-                    lives: self.committed_lives.unwrap_or(0),
+                    lives: curr_lives,
                     done: false,
                     is_event: true,
                     is_menu,
@@ -113,107 +136,29 @@ impl NinpekTracker {
             self.stage_complete_rewarded = false;
         }
 
-        // Life tracking
-        self.life_pixels.clear();
-        let lr = &lives::LIFE_REGION;
-        for y in lr.y as usize..(lr.y + lr.h) as usize {
-            let start = (y * w as usize + lr.x as usize) * 4;
-            let end = start + lr.w as usize * 4;
-            self.life_pixels.extend_from_slice(&pixels[start..end]);
-        }
-
-        let mut life_reward = 0.0;
-        let curr_lives = if let Some(committed) = self.committed_lives {
-            let change = lives::check_life_change(pixels, w, committed);
-            let detected = (committed as i32 + change) as u32;
-
-            if change != 0 {
-                match &self.pending_lives {
-                    Some((pend_count, pend_pixels))
-                        if *pend_count == detected && *pend_pixels == self.life_pixels =>
-                    {
-                        if change == 1 {
-                            life_reward = rewards::LIFE_GAINED;
-                        } else if change == -1 {
-                            life_reward = rewards::LIFE_LOST;
-                        }
-                        self.committed_lives = Some(detected);
-                        self.pending_lives = None;
-                    }
-                    _ => {
-                        self.pending_lives = Some((detected, self.life_pixels.clone()));
-                    }
-                }
-            } else {
-                self.pending_lives = None;
-            }
-            committed
-        } else {
-            let l = lives::count_lives(pixels, w);
-            self.committed_lives = Some(l);
-            l
-        };
-
-        if life_reward != 0.0 {
+        if lives_delta == -1 {
             return FrameResult {
-                reward: life_reward,
-                event_name: if life_reward > 0.0 {
-                    events::LIFE_GAINED
-                } else {
-                    events::LIFE_LOST
-                },
+                reward: rewards::LIFE_LOST,
+                event_name: events::LIFE_LOST,
                 lives: curr_lives,
                 done: false,
                 is_event: true,
                 is_menu,
             };
         }
-
-        // Score tracking with 2-frame stability
-        let curr_clean = score::is_score_clean(pixels, w, &NINPEK_SCORE);
-
-        // prev_valid means prev was clean when stored — no need to re-check
-        let both_clean = curr_clean && self.prev_valid;
-
-        let mut score_reward = 0.0;
-        if curr_clean {
-            // Only extract score pixels when current frame is clean
-            self.score_pixels.clear();
-            for y in NINPEK_SCORE.region.y..NINPEK_SCORE.region.y + NINPEK_SCORE.region.h {
-                for x in NINPEK_SCORE.region.x..NINPEK_SCORE.region.x + NINPEK_SCORE.region.w {
-                    let i = (y * w + x) as usize * 4;
-                    self.score_pixels.push(score::quantize(pixels[i]));
-                    self.score_pixels.push(score::quantize(pixels[i + 1]));
-                    self.score_pixels.push(score::quantize(pixels[i + 2]));
-                }
-            }
-
-            if both_clean {
-                match &self.pending_score {
-                    Some(pend) if *pend == self.score_pixels => {
-                        if let Some(committed) = &self.committed_score {
-                            if *committed != self.score_pixels {
-                                score_reward = rewards::SCORE_UP;
-                            }
-                        }
-                        self.committed_score = Some(self.score_pixels.clone());
-                        self.pending_score = None;
-                    }
-                    _ => {
-                        self.pending_score = Some(self.score_pixels.clone());
-                    }
-                }
-            }
-
-            self.prev_valid = true;
-        } else {
-            self.pending_score = None;
-            self.prev_valid = false;
-        }
-
-        if score_reward != 0.0 {
+        if lives_delta == 1 {
             return FrameResult {
-                reward: score_reward,
+                reward: rewards::LIFE_GAINED,
+                event_name: events::LIFE_GAINED,
+                lives: curr_lives,
+                done: false,
+                is_event: true,
+                is_menu,
+            };
+        }
+        if score_delta > 0 {
+            return FrameResult {
+                reward: rewards::SCORE_UP * (score_delta as f64) / rewards::POINTS_PER_PICKUP,
                 event_name: events::SCORE,
                 lives: curr_lives,
                 done: false,
@@ -253,12 +198,22 @@ impl GameTracker for NinpekTracker {
         )
     }
 
-    fn is_menu_screen(&self, pixels: &[u8]) -> bool {
-        let w = self.width;
-        game_over::is_leaderboard(pixels, w)
-            || game_over::is_stage_complete(pixels, w)
-            || game_over::is_game_complete(pixels, w)
-            || game_over::is_game_menu(pixels, w)
+    fn observe_idle(&mut self, _pixels: &[u8]) -> bool {
+        self.refresh_mem_state();
+        self.last_mem_score.is_some() && self.last_mem_lives.is_some()
+    }
+
+    fn reset_episode(&mut self) {
+        self.last_mem_score = None;
+        self.last_mem_lives = None;
+        self.game_over_pending = false;
+        self.stage_complete_pending = false;
+        self.stage_complete_rewarded = false;
+        self.game_complete_pending = false;
+        self.ep_scores = 0;
+        self.ep_life_gained = 0;
+        self.ep_life_lost = 0;
+        self.ep_survival = 0.0;
     }
 
     fn reset_sequence(&self) -> &[usize] {

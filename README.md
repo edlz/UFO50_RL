@@ -2,7 +2,7 @@
 
 PPO reinforcement learning agent that learns to play [UFO 50](https://50games.fun/) games by capturing the screen and sending keyboard inputs. Windows-only (Linux-portable architecture).
 
-Currently trains on **Ninpek** (game 3) with pixel-based reward detection for score, lives, stage completion, and game over.
+Currently trains on **Ninpek** (game 3). Score and lives are read directly from `ufo50.exe` process memory via pointer chains; stage completion and game over are detected from the captured frame pixels.
 
 ## Requirements
 
@@ -80,14 +80,17 @@ Two-thread design on Windows (message pump requirement). Training thread uses `G
 
 | Event | Reward | Detection |
 |-------|--------|-----------|
-| Score increase | +1.0 | B/W pixel flips in score region (quantized, 2-frame stable) |
-| Life gained | 0.0 (disabled) | Was duplicating SCORE_UP signal |
-| Life lost | -1.0 | Slot-based, boundary-only check, 2-frame stable |
-| Stage complete | +10.0 | Blue+orange icons + center white text + black screen |
-| Game over | -5.0 | Leaderboard row pattern detection |
+| Score increase | +1.0 per 50 points | Score delta from process memory |
+| Life gained | +1.0 | Lives delta from process memory |
+| Life lost | -1.0 | Lives delta from process memory |
+| Stage complete | +10.0 | Stage-clear screen pixel pattern (2-frame stable) |
+| Game won (final stage) | +10.0 | Game-complete screen pixel pattern (2-frame stable) |
+| Game over | -5.0 | Leaderboard row pattern (2-frame stable) |
 | Survival | +0.001/frame | When no other event |
 
-Menu/transition frames (black screens, game selection, leaderboards) are automatically detected and skipped.
+Score (`+0xD0`) and lives (`+0x4C0`) are read from a Game Maker RValue pair on the same object via a shared pointer-chain prefix off `ufo50.exe+0x00742230`. After a reset the tracker waits for `score == 0 && lives == 3` (`observe_idle`) before handing the episode to PPO, so menu animations and the previous run's state never leak into training.
+
+Menu/transition frames (leaderboards, stage-complete, game-complete) are still detected from pixels and excluded from PPO updates via `is_menu`.
 
 ## TensorBoard Metrics
 
@@ -114,7 +117,7 @@ Menu/transition frames (black screens, game selection, leaderboards) are automat
 ## Adding a New Game
 
 1. Create `src/games/yourgame/` with tracker, score, lives, game_over, rewards modules
-2. Implement `GameTracker` trait (process_frame, is_menu_screen, reset_sequence, episode_breakdown, config)
+2. Implement `GameTracker` trait (process_frame, observe_idle, reset_sequence, episode_breakdown, obs/action dims)
 3. In `src/games/yourgame/mod.rs`, expose `pub fn definition() -> GameDefinition` with window title, obs dims, action count, tracker factory, and per-game hyperparameters
 4. Create `src/bin/train_yourgame.rs` — copy `train_ninpek.rs` and swap `games::ninpek::definition()` for your game's
 5. All pixel region coordinates are calibrated per resolution (noted in each game's mod.rs)
@@ -136,9 +139,9 @@ src/
     ninpek/
       mod.rs            # pub fn definition() -> GameDefinition
       tracker.rs        # NinpekTracker state machine
-      score.rs          # Score OCR (quantized B/W classification)
-      lives.rs          # Slot-based life counting
-      game_over.rs      # Leaderboard, stage/game complete, menu detection
+      mem.rs            # Process memory reader (score + lives via pointer chain)
+      game_over.rs      # Leaderboard, stage/game complete pixel detection
+      events.rs         # Event-name string constants shared by tracker + debug
       rewards.rs        # Reward value constants
   train/
     model.rs            # ActorCritic CNN (Nature DQN, parameterized over obs dims)
